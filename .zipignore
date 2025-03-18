@@ -1,0 +1,4 @@
+myenv/*
+lambda_layer/*
+.git/*
+__pycache__/*
