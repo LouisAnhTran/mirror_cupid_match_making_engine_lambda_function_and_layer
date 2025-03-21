@@ -6,6 +6,7 @@ import asyncpg
 import asyncio
 import uuid
 from twilio.rest import Client
+import httpx
 
 from config import (
     DATABASE_URL,
@@ -124,46 +125,24 @@ async def process_event(event):
     # YOUR CODE
     
     
-    
-    
-    
-    
-    
     # for example after yall do matching, user louis match user emma002
     match_pairs=[('louis','emma002')]
     
-    # insert new pairs to table match pairs
-    for pair in match_pairs:
-        # Generate a random UUID (Version 4)
-        match_id = str(uuid.uuid4())
-        
-        await insert_new_pair_to_match_pair_table(
-            match_id=match_id,
-            user1=pair[0],
-            user2=pair[1]
-        )
-        
-        for user in pair:
-            # update users table status
-            await update_user_status_after_match(
-                match_id=match_id,
-                username=user
-            )
-            
-             # Send sms via Twilio
-            try:
-                client.messages.create(
-                    body=f"Hey {user}, Mirror found a perfect match for you, please check it out",
-                    from_=TWILIO_PHONE_NUMBER,
-                    to=await get_user_phonenumber_by_username(
-                        username=user
-                    )
-                )
-                print(f"send sms to user {user} successfully")
-            except Exception as e:
-                print(f"error when sending sms to {user}, error details {e}")
- 
-        
+    payload={
+        "match_pairs": [user1+"-"+user2 for user1,user2 in match_pairs]
+    }
+    
+    # Make the POST request to Backend to send all Match pairs
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post("http://localhost:8001/api/v1/auth/match_pairs", json=payload)
+            response.raise_for_status()  # Raise an error if not 2xx
+            print("Match posted successfully:", response.json())
+        except httpx.HTTPStatusError as exc:
+            print(f"HTTP error occurred: {exc.response.status_code} - {exc.response.text}")
+        except Exception as e:
+            print(f"An error occurred: {str(e)}")
+          
     logger.info(f"Received event: {json.dumps(event, indent=4)}")
 
     return {
