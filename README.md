@@ -26,5 +26,4 @@
     ./scripts/update_deploy_layer.sh    
     ```
 
-
     

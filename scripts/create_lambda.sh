@@ -8,6 +8,12 @@ HANDLER="lambda_function.lambda_handler"
 ZIP_FILE="function.zip"
 REGION="ap-southeast-1"
 
+# Clean old zip if exists
+rm -f "$ZIP_FILE"
+
+# Create function.zip excluding files in .zipignore
+zip -r "$ZIP_FILE" . -x@.zipignore
+
 # Create the Lambda function
 aws lambda create-function \
     --function-name "$FUNCTION_NAME" \
@@ -15,4 +21,5 @@ aws lambda create-function \
     --role "$ROLE_ARN" \
     --handler "$HANDLER" \
     --zip-file "fileb://$ZIP_FILE" \
-    --region "$REGION"
+    --region "$REGION" \
+    --architectures x86_64

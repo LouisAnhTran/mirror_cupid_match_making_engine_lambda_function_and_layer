@@ -1,133 +1,145 @@
-print("hello")
+print("hello1")
 
 import json
 import logging
 import asyncpg
 import asyncio
 import uuid
-from twilio.rest import Client
 import httpx
 
 from config import (
-    DATABASE_URL,
-    TWILIO_ACCOUNT_SID,
-    TWILIO_AUTH_TOKEN,
-    TWILIO_PHONE_NUMBER
+    DATABASE_URL
 )
 
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# Twilio configuration
-client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-
 async def get_connection():
     return await asyncpg.connect(DATABASE_URL)
 
-async def fetch_all_users():
-    conn=await get_connection()
+async def fetch_all_available_users():
+    conn = await get_connection()
 
-    try:
-        query=f'''
-        select * from users as u
-        '''
-
-        result=await conn.fetch(query)
-
-        return result
-    except Exception as e:
-        print("Failed to retrieve user")
-        logger.info(f"Failed to retrieve user ",e.args)
-        raise RuntimeError("Server error while fetching users")
-    
-async def get_user_phonenumber_by_username(username: str):
-    conn=await get_connection()
-
-    try:
-        query=f'''
-        select 
-            u.phone_number
-        from users as u
-        where u.username=$1;
-        '''
-
-        result=await conn.fetch(query,username)
-
-        return result
-    except Exception as e:
-        print("Failed to retrieve user phone number")
-        logger.info(f"Failed to retrieve user ",e.args)
-        raise RuntimeError("Server error while fetching user phone number")
-
-async def insert_new_pair_to_match_pair_table(
-    match_id: str,
-    user1: str,
-    user2: str
-):
-    conn=await get_connection()
-    
     try:
         query = '''
-        INSERT INTO match_pairs (
-            match_id, 
-            user_1, 
-            user_2, 
-            user_1_action, 
-            user_2_action
-        ) 
-        VALUES 
-            ($1, $2 , $3, NULL, NULL)
+        SELECT *
+        FROM users AS u 
+        WHERE u.status = 'available' and u.is_profile_creation_complete=true and embedding IS NOT null;
         '''
 
-        await conn.execute(query, match_id, user1, user2)
-        
-        print('Successfuly add pair to match_pairs table')
-        logger.info("Successfuly add pair to match_pairs table")
+        result = await conn.fetch(query)
+        return result
+
     except Exception as e:
-        print("Failed to add pair to match_pairs")
-        logging.info("Failed to add pair to match_pairs, error message: ",e.args[0])
-        raise RuntimeError("Server error while add pairs")
- 
-async def update_user_status_after_match(
-    match_id: str,
-    username: str
-):
-    conn=await get_connection()
+        logger.error("Failed to retrieve available users", exc_info=True)
+        raise RuntimeError("Server error while fetching users") from e
     
+async def fetch_most_similar_user(
+    embedding_vector: list[float],
+    min_age: int,
+    max_age: int,
+    gender_preference: str,
+    excluded_usernames: list[str]
+):
+    conn = await get_connection()
+
     try:
         query = '''
-        UPDATE users 
-        SET 
-            status = 'frozen',
-            match_reference_id=$1
-        WHERE username = $2;
+        SELECT *,
+               1 - (embedding <#> $1::vector) AS similarity_score
+        FROM users
+        WHERE embedding IS NOT NULL
+          AND DATE_PART('year', AGE(CURRENT_DATE, TO_DATE(birthday, 'YYYY-MM-DD'))) BETWEEN $2 AND $3
+          AND gender = $4
+          AND username = ANY($5::text[])
+        ORDER BY embedding <#> $1::vector
+        LIMIT 1;
         '''
 
-        await conn.execute(query, match_id,username)
-        
-        print(f'Successfuly update status for user {username}')
-        logger.info(f'Successfuly update status for user {username}')
+        result = await conn.fetchrow(
+            query, embedding_vector, min_age, max_age, gender_preference, excluded_usernames
+        )
+
+        if result:
+            print(f"Matched user: {result['username']} | Similarity Score: {result['similarity_score']:.4f}")
+        return result
+
     except Exception as e:
-        print("Failed to update status for user")
-        logging.info("Failed to update status for user ",e.args[0])
-        raise RuntimeError("Server error while updating users")
- 
+        logger.error("Failed to fetch most similar user", exc_info=True)
+        raise RuntimeError("Error during similarity search") from e
+
+
+
+
 async def process_event(event):
     """Helper function to process the event asynchronously"""
     
-    users=await fetch_all_users()
+    users_in_available_pool=await fetch_all_available_users()
     
-    print("users: ",users)
+    if not users_in_available_pool:
+        return {
+        'statusCode': 200,
+        'body': json.dumps({"message": "Hello from local Lambda! There is no available user"})
+    }
     
-    # TODO
-    # Mathching algorithms come here
-    # YOUR CODE
+    username_users_in_available_pool=[user['username'] for user in users_in_available_pool]
     
+    print("available users usernames: ",username_users_in_available_pool)
     
-    # for example after yall do matching, user louis match user emma002
-    match_pairs=[('louis','emma002')]
+    match_pairs=[]
     
+    while username_users_in_available_pool:
+        user=username_users_in_available_pool.pop()
+
+        print()
+        print("finding match for user: ",user)
+        
+        record_of_this_user=[entry for entry in users_in_available_pool if entry['username']==user][0]
+        
+        embedding_of_user=record_of_this_user['embedding']
+        
+        # print(f"embeding of user {user}: {embedding_of_user}")
+        
+        preferred_age_range=record_of_this_user['age_range']
+        
+        print("preferred age range: ",preferred_age_range)
+        
+        min_age=int(preferred_age_range.split("-")[0])
+        
+        max_age=int(preferred_age_range.split("-")[1])
+        
+        preferred_gender=record_of_this_user['gender_preferences']
+        
+        similar_user_with_score=await fetch_most_similar_user(
+            embedding_vector=embedding_of_user,
+            min_age=min_age,
+            max_age=max_age,
+            gender_preference=preferred_gender,
+            excluded_usernames=username_users_in_available_pool
+        )
+        
+        if not similar_user_with_score:
+            print(f"can not find any user match with {user}")
+            continue
+        
+        matched_username=similar_user_with_score['username']
+        
+        
+        similarity_score=similar_user_with_score['similarity_score']
+        
+        print("matched username: ",matched_username)
+        
+        print("similarity score: ",similarity_score) 
+        
+        match_pairs.append((user,matched_username))
+        
+        username_users_in_available_pool.remove(matched_username)
+        
+        print("available user username: ",username_users_in_available_pool)
+        
+    print("final match pairs: ",match_pairs)
+       
     payload={
         "match_pairs": [user1+"-"+user2 for user1,user2 in match_pairs]
     }
