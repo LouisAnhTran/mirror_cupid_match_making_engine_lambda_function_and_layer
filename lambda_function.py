@@ -35,12 +35,34 @@ async def fetch_all_available_users():
         logger.error("Failed to retrieve available users", exc_info=True)
         raise RuntimeError("Server error while fetching users") from e
     
+
+async def fetch_unmatched_usernames(username: str):
+    conn = await get_connection()
+
+    try:
+        query = '''
+        SELECT u1.username2 as username
+        FROM unmatch_pairs AS u1 
+        WHERE u1.username1 = $1
+        UNION
+        SELECT u2.username1 as username
+        FROM unmatch_pairs AS u2 
+        WHERE u2.username2 = $1;
+        '''
+
+        result = await conn.fetch(query, username)
+        return result
+    except Exception as e:
+        logger.error("Failed to retrieve unmatched usernames", exc_info=True)
+        raise RuntimeError("Server error while fetching unmatched usernames") from e
+
+
 async def fetch_most_similar_user(
     embedding_vector: list[float],
     min_age: int,
     max_age: int,
     gender_preference: str,
-    excluded_usernames: list[str]
+    included_usernames: list[str]
 ):
     conn = await get_connection()
 
@@ -58,7 +80,7 @@ async def fetch_most_similar_user(
         '''
 
         result = await conn.fetchrow(
-            query, embedding_vector, min_age, max_age, gender_preference, excluded_usernames
+            query, embedding_vector, min_age, max_age, gender_preference, included_usernames
         )
 
         if result:
@@ -111,12 +133,24 @@ async def process_event(event):
         
         preferred_gender=record_of_this_user['gender_preferences']
         
+        unmatched_usernames_before=await fetch_unmatched_usernames(username=user)
+        
+        print("unmatched_usernames_before: ",unmatched_usernames_before)
+        
+        formatted_unmatched_useranmes_before=[] if not unmatched_usernames_before else [entry['username'] for entry in unmatched_usernames_before]
+        
+        print('formatted_unmatched_useranmes_before: ',formatted_unmatched_useranmes_before)
+            
+        included_users_name_for_matching=[user_entry for user_entry in username_users_in_available_pool if user_entry not in formatted_unmatched_useranmes_before]
+        
+        print('included_users_name_for_matching: ',included_users_name_for_matching)
+            
         similar_user_with_score=await fetch_most_similar_user(
             embedding_vector=embedding_of_user,
             min_age=min_age,
             max_age=max_age,
             gender_preference=preferred_gender,
-            excluded_usernames=username_users_in_available_pool
+            included_usernames=included_users_name_for_matching
         )
         
         if not similar_user_with_score:
@@ -148,7 +182,6 @@ async def process_event(event):
     async with httpx.AsyncClient() as client:
         try:
             response = await client.post("http://localhost:8001/api/v1/auth/match_pairs", json=payload)
-            response.raise_for_status()  # Raise an error if not 2xx
             print("Match posted successfully:", response.json())
         except httpx.HTTPStatusError as exc:
             print(f"HTTP error occurred: {exc.response.status_code} - {exc.response.text}")
